@@ -1,0 +1,49 @@
+name: Subvox
+options:
+  bundleIdPrefix: com.joeblau
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: K78G42H4U2
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  Subvox:
+    type: application
+    platform: macOS
+    sources: [Subvox]
+    info:
+      path: Subvox/Info.plist
+      properties:
+        CFBundleDisplayName: Subvox
+        LSApplicationCategoryType: public.app-category.developer-tools
+        NSMotionUsageDescription: Subvox reads AirPods head-motion data to study whether mouthed words can be decoded into text.
+        NSMicrophoneUsageDescription: Subvox records microphone audio alongside motion data and transcribes whispered speech for comparison.
+        NSSpeechRecognitionUsageDescription: Subvox transcribes microphone audio on-device as a reference for the motion decoder.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.joeblau.subvox
+        CODE_SIGN_IDENTITY: Apple Development
+        ENABLE_HARDENED_RUNTIME: NO
+  SubvoxTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources: [SubvoxTests]
+    dependencies:
+      - target: Subvox
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.joeblau.subvox.tests
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  Subvox:
+    build:
+      targets:
+        Subvox: all
+        SubvoxTests: [test]
+    test:
+      targets: [SubvoxTests]
