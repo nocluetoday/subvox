@@ -209,8 +209,8 @@ private struct SequenceModelPanel: View {
                         metric("Channels", "\(info.featureSet.channelNames.count)\(info.featureSet.contains(.lips) ? " incl. lips" : "")")
                     }
                     Text(info.validationAccuracy == nil
-                         ? "No validation score: each word needs 5+ takes so one in five can be held out."
-                         : "Validation accuracy is on \(info.validationCount) held-out takes the model never saw.")
+                         ? "No validation score yet: about 1 in 5 of your takes is kept for testing, and none are kept so far."
+                         : "Validation accuracy is on \(info.validationCount) of your silent takes the model never saw\(info.autoTakeCount.map { $0 > 0 ? "; trained with \($0) takes from your speech" : "" } ?? "").")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if model.sequenceModelIsStale {

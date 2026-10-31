@@ -15,12 +15,14 @@ final class AppModel {
         case sensors = "Sensors"
         case train = "Train"
         case decode = "Decode"
+        case autoTrain = "Auto-train"
         var id: String { rawValue }
         var symbol: String {
             switch self {
             case .sensors: "waveform.path.ecg"
             case .train: "square.stack.3d.up"
             case .decode: "text.bubble"
+            case .autoTrain: "arrow.triangle.2.circlepath"
             }
         }
     }
@@ -40,6 +42,7 @@ final class AppModel {
     let motion = HeadphoneMotionService()
     let camera = FaceCameraService()
     let voice = VoiceOutput()
+    let autoTrainer = AutoTrainer()
     let audio = AudioService()
     let transcriber = MicTranscriber()
     let capture = CaptureController()
@@ -100,16 +103,29 @@ final class AppModel {
         started = true
         motion.onSample = { [weak self] sample in self?.ingest(sample) }
         capture.onSegment = { [weak self] segment in self?.handleSegment(segment) }
-        camera.onSample = { [weak self] lip in self?.recorder.record(lip) }
+        camera.onSample = { [weak self] lip in
+            self?.recorder.record(lip)
+            self?.autoTrainer.ingest(lip)
+        }
+        transcriber.onFinalWords = { [weak self] words in
+            guard let self else { return }
+            self.autoTrainer.collect(words, vocabulary: self.dataset.vocabulary)
+        }
+        autoTrainer.onScheduledRun = { [weak self] in await self?.runAutoTraining(scheduled: true) }
         motion.start()
         audio.refreshDevices()
         voice.refresh()
+        autoTrainer.startScheduleIfEnabled()
+        if autoTrainer.isCollecting {
+            Task { await startCollecting() }
+        }
         installKeyMonitor()
     }
 
     private func ingest(_ sample: MotionSample) {
         capture.ingest(sample)
         recorder.record(sample)
+        autoTrainer.ingest(sample)
     }
 
     private func syncCaptureMode() {
@@ -156,6 +172,8 @@ final class AppModel {
             }
         case .sensors:
             recorder.logEvent(segment, kind: "segment", label: recorder.prompt, confidence: nil)
+        case .autoTrain:
+            break
         }
     }
 
@@ -186,6 +204,7 @@ final class AppModel {
         case .train: return selectedWord != nil
         case .decode: return decodeMode == .hold && readyToDecode
         case .sensors: return recorder.isRecording
+        case .autoTrain: return false
         }
     }
 
@@ -362,6 +381,25 @@ final class AppModel {
         decoded.removeAll()
         lastSegment = []
         lastSegmentLips = []
+    }
+
+    // MARK: Auto-training
+
+    /// Collecting needs the mic and recognizer for word timings; the camera is optional.
+    func startCollecting() async {
+        autoTrainer.isCollecting = true
+        if !audio.isRunning { await audio.start() }
+        if audio.isRunning, !transcriber.isRunning { await transcriber.start(sink: audio.sink) }
+    }
+
+    func stopCollecting() {
+        autoTrainer.isCollecting = false
+    }
+
+    func runAutoTraining(scheduled: Bool = false) async {
+        let adopted = await autoTrainer.run(manual: dataset.templates, featureSet: featureSet,
+                                            champion: sequenceModel, scheduled: scheduled)
+        if let adopted { sequenceModel = adopted }
     }
 
     // MARK: Camera

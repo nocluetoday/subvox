@@ -1,14 +1,23 @@
 import Foundation
 
+/// Where a take came from. `nil` on older takes means you recorded it.
+enum TakeSource: String, Codable, Sendable {
+    case manual
+    /// Cut automatically from your own speech, using speech-recognizer word timings.
+    case speech
+}
+
 struct Template: Codable, Identifiable, Hashable, Sendable {
     var id = UUID()
     var label: String
     var samples: [MotionSample]
     /// Camera lip landmarks over the same time window, when the camera was running.
     var lips: [LipSample]?
+    var source: TakeSource?
     var createdAt = Date()
 
     var hasLips: Bool { !(lips ?? []).isEmpty }
+    var isManual: Bool { source != .speech }
 
     func frames(_ set: FeatureSet) -> [[Double]] {
         MotionFeatures.frames(MotionFeatures.trim(samples), lips: lips, set: set)

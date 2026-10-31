@@ -95,7 +95,7 @@ final class FusionTests: XCTestCase {
         let model = try SequenceModel.train(templates: templates, featureSet: [.rotation, .lips],
                                             maxIterations: 60, persist: false)
         XCTAssertEqual(Set(model.info.labels), ["yes", "no"])
-        XCTAssertEqual(model.info.validationCount, 4)
+        XCTAssertEqual(model.info.validationCount, templates.filter(SequenceModel.isTestTake).count)
         XCTAssertFalse(model.isStale(templates: templates, featureSet: [.rotation, .lips]))
         XCTAssertTrue(model.isStale(templates: templates, featureSet: .motion))
 

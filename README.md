@@ -61,6 +61,16 @@ The training set lives at `~/Library/Application Support/Subvox/dataset.json`.
 
 `PhraseDecoder` runs one-pass connected-word DTW. It matches each phrase's words in order against all takes of each word, and allows short pauses between words. Only phrases on the list can be decoded. Channels are locally centered over about 1 s, so a word looks the same alone and inside a phrase. New phrases need no retraining.
 
+## Auto-training
+
+The **Auto-train** screen trains the Core ML model without button presses.
+
+1. **Collect.** Turn on **Collect takes from my speech**. While you talk or whisper at the Mac with AirPods in, the speech recognizer gives each word's timing. For each vocabulary word, the motion (and lips, if the camera is on) over that time becomes a take. Takes are dropped for unclear speech, bad length, or missing AirPods motion. Collected takes go to a pool (`~/Library/Application Support/Subvox/AutoTrain/pool.json`, newest 150 per word). They never mix into your Train takes.
+2. **Retrain.** With **Retrain automatically** on, Subvox checks every hour. It trains when the Mac is plugged in, idle for 10 min, 20 h after the last run, with 10+ new takes. Subvox must be open. **Run Now** trains at once.
+3. **Gate.** About 1 in 5 of your own Train takes is a fixed silent test set, picked by take ID. No model trains on it. The new model (challenger) replaces the current one (champion) only if it scores better on these takes. Each run is logged and posts a notification.
+
+Speech takes are voiced or whispered, but you decode silent mouthing. The gate checks that the extra data really helps on silent takes.
+
 ## Silent calls
 
 1. Create a Personal Voice in **System Settings › Accessibility › Personal Voice** (optional; a system voice is used otherwise). Then click **Use My Personal Voice…** in the Decode screen.
