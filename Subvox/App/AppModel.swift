@@ -4,7 +4,9 @@ import Observation
 struct DecodedWord: Identifiable, Hashable {
     let id = UUID()
     var prediction: Prediction
-    var text: String { prediction.best?.label ?? "?" }
+    /// A phrase's output text, shown and spoken in place of the phrase.
+    var output: String?
+    var text: String { output ?? prediction.best?.label ?? "?" }
 }
 
 @MainActor @Observable
@@ -21,6 +23,12 @@ final class AppModel {
             case .decode: "text.bubble"
             }
         }
+    }
+
+    enum DecodeUnit: String, CaseIterable, Identifiable {
+        case words = "Words"
+        case phrases = "Phrases"
+        var id: String { rawValue }
     }
 
     enum Decoder: String, CaseIterable, Identifiable {
@@ -49,6 +57,7 @@ final class AppModel {
         didSet { rebuildClassifier() }
     }
     private(set) var classifier: TemplateClassifier?
+    private(set) var phraseDecoder: PhraseDecoder?
     private(set) var evaluation: Evaluation?
     private(set) var isEvaluating = false
     private(set) var lastTemplateID: Template.ID?
@@ -59,6 +68,9 @@ final class AppModel {
     // MARK: Decoding
 
     var decodeMode: CaptureController.Mode = .hold {
+        didSet { syncCaptureMode() }
+    }
+    var decodeUnit: DecodeUnit = .words {
         didSet { syncCaptureMode() }
     }
     var decoder: Decoder = .dtw
@@ -102,6 +114,7 @@ final class AppModel {
 
     private func syncCaptureMode() {
         capture.autoEnabled = screen == .decode && decodeMode == .auto
+        capture.phraseMode = screen == .decode && decodeUnit == .phrases
     }
 
     private func handleSegment(_ segment: [MotionSample]) {
@@ -128,12 +141,18 @@ final class AppModel {
             addTemplate(Template(label: word, samples: segment, lips: lips))
             recorder.logEvent(segment, kind: "train", label: word, confidence: nil)
         case .decode:
-            guard let prediction = predict(segment, lips: lips) else { return }
-            decoded.append(DecodedWord(prediction: prediction))
-            recorder.logEvent(segment, kind: prediction.accepted ? "decode" : "reject",
-                              label: prediction.best?.label ?? "", confidence: prediction.confidence)
-            if prediction.accepted, voice.speaksDecodedWords, let word = prediction.best?.label {
-                voice.speak(word)
+            Task {
+                guard let prediction = await predict(segment, lips: lips) else { return }
+                let output = decodeUnit == .phrases
+                    ? dataset.phrases.first { $0.text == prediction.best?.label }?.spoken
+                    : nil
+                let word = DecodedWord(prediction: prediction, output: output)
+                decoded.append(word)
+                recorder.logEvent(segment, kind: prediction.accepted ? "decode" : "reject",
+                                  label: prediction.best?.label ?? "", confidence: prediction.confidence)
+                if prediction.accepted, voice.speaksDecodedWords {
+                    voice.speak(word.text)
+                }
             }
         case .sensors:
             recorder.logEvent(segment, kind: "segment", label: recorder.prompt, confidence: nil)
@@ -173,17 +192,19 @@ final class AppModel {
     // MARK: Decoders
 
     var canDecode: Bool {
+        if decodeUnit == .phrases { return phraseDecoder != nil }
         switch decoder {
-        case .dtw: classifier != nil
-        case .sequenceModel: sequenceModel != nil
+        case .dtw: return classifier != nil
+        case .sequenceModel: return sequenceModel != nil
         }
     }
 
     /// True when the active decoder fuses lip channels, so the camera should be running.
     var decoderUsesLips: Bool {
+        if decodeUnit == .phrases { return phraseDecoder?.featureSet.contains(.lips) ?? false }
         switch decoder {
-        case .dtw: classifier?.featureSet.contains(.lips) ?? false
-        case .sequenceModel: sequenceModel?.info.featureSet.contains(.lips) ?? false
+        case .dtw: return classifier?.featureSet.contains(.lips) ?? false
+        case .sequenceModel: return sequenceModel?.info.featureSet.contains(.lips) ?? false
         }
     }
 
@@ -192,9 +213,17 @@ final class AppModel {
 
     var readyToDecode: Bool { canDecode && !decodeBlockedByCamera }
 
-    private func predict(_ segment: [MotionSample], lips: [LipSample]?) -> Prediction? {
+    private func predict(_ segment: [MotionSample], lips: [LipSample]?) async -> Prediction? {
         // Also refuse segments where the camera was on but saw no face.
         guard readyToDecode, lips != nil || !decoderUsesLips else { return nil }
+        // Phrases are matched against the word takes with DTW, whichever word decoder is picked.
+        // Every phrase is a full connected-word search, so run it off the main thread.
+        if decodeUnit == .phrases, let phraseDecoder {
+            let (maxDistance, minConfidence) = (maxDistance, minConfidence)
+            return await Task.detached(priority: .userInitiated) {
+                phraseDecoder.predict(segment, lips: lips, maxDistance: maxDistance, minConfidence: minConfidence)
+            }.value
+        }
         switch decoder {
         case .dtw:
             return classifier?.predict(segment, lips: lips, maxDistance: maxDistance, minConfidence: minConfidence)
@@ -255,6 +284,38 @@ final class AppModel {
         persist()
     }
 
+    /// Adds a phrase and puts any new words in the vocabulary so they can be trained.
+    func addPhrase(_ raw: String, output: String) {
+        let words = raw.lowercased()
+            .split { !$0.isLetter && !$0.isNumber && $0 != "'" }
+            .map(String.init)
+        guard !words.isEmpty else { return }
+        let text = words.joined(separator: " ")
+        guard !dataset.phrases.contains(where: { $0.text == text }) else { return }
+        for word in words where !dataset.vocabulary.contains(word) {
+            dataset.vocabulary.append(word)
+        }
+        dataset.phrases.append(Phrase(text: text, output: output.trimmingCharacters(in: .whitespacesAndNewlines)))
+        persist()
+    }
+
+    func removePhrase(_ id: Phrase.ID) {
+        dataset.phrases.removeAll { $0.id == id }
+        persist()
+    }
+
+    func setPhraseOutput(_ id: Phrase.ID, _ output: String) {
+        guard let index = dataset.phrases.firstIndex(where: { $0.id == id }) else { return }
+        dataset.phrases[index].output = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Outputs are looked up at decode time; no need to rebuild the decoders.
+        TemplateStore.save(dataset)
+    }
+
+    /// Words of `phrase` that have no takes yet.
+    func untrainedWords(in phrase: Phrase) -> [String] {
+        phrase.words.filter { templates(for: $0).isEmpty }
+    }
+
     func addTemplate(_ template: Template) {
         dataset.templates.append(template)
         lastTemplateID = template.id
@@ -273,6 +334,7 @@ final class AppModel {
 
     private func rebuildClassifier() {
         classifier = TemplateClassifier(templates: dataset.templates, featureSet: featureSet)
+        phraseDecoder = PhraseDecoder(templates: dataset.templates, featureSet: featureSet, phrases: dataset.phrases)
         evaluation = nil
     }
 

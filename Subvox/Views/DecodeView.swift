@@ -9,7 +9,9 @@ struct DecodeView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 if !model.canDecode {
-                    Label(model.decoder == .dtw
+                    Label(model.decodeUnit == .phrases
+                          ? "Add at least two phrases whose words all have takes (Train tab)."
+                          : model.decoder == .dtw
                           ? "Train at least two words in the Train tab first."
                           : "Train the Core ML model in the Train tab first.",
                           systemImage: "exclamationmark.triangle")
@@ -34,11 +36,23 @@ struct DecodeView: View {
         @Bindable var capture = model.capture
         return GroupBox {
             VStack(alignment: .leading, spacing: 12) {
-                Picker("Decoder", selection: $model.decoder) {
-                    ForEach(AppModel.Decoder.allCases) { Text($0.rawValue).tag($0) }
+                Picker("Decode", selection: $model.decodeUnit) {
+                    ForEach(AppModel.DecodeUnit.allCases) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 .frame(maxWidth: 320)
+
+                if model.decodeUnit == .words {
+                    Picker("Decoder", selection: $model.decoder) {
+                        ForEach(AppModel.Decoder.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 320)
+                } else {
+                    Text("Mouth a whole phrase in one hold. It is matched word by word against your takes (DTW), and only phrases on your list can come out.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
 
                 if model.decoderUsesLips {
                     CameraStatusRow()
@@ -57,7 +71,7 @@ struct DecodeView: View {
 
                 if model.decodeMode == .hold {
                     HoldToCaptureButton(
-                        title: "Mouth a word",
+                        title: model.decodeUnit == .phrases ? "Mouth a phrase" : "Mouth a word",
                         isCapturing: capture.isCapturing,
                         isEnabled: model.readyToDecode && model.motion.status == .streaming,
                         onBegin: capture.begin,
@@ -67,7 +81,7 @@ struct DecodeView: View {
                 }
 
                 HStack(spacing: 24) {
-                    if model.decoder == .dtw {
+                    if model.decoder == .dtw || model.decodeUnit == .phrases {
                         LabeledContent("Max distance") {
                             Slider(value: $model.maxDistance, in: 0.2...4).frame(width: 140)
                             Text(String(format: "%.2f", model.maxDistance)).monospacedDigit().frame(width: 36)
@@ -136,7 +150,7 @@ struct DecodeView: View {
                         .disabled(model.decoded.isEmpty)
                 }
                 if model.decoded.isEmpty {
-                    Text("Mouth a trained word…")
+                    Text(model.decodeUnit == .phrases ? "Mouth a phrase from your list…" : "Mouth a trained word…")
                         .font(.system(size: 28, weight: .regular, design: .rounded))
                         .foregroundStyle(.tertiary)
                         .frame(maxWidth: .infinity, minHeight: 80, alignment: .topLeading)
@@ -168,9 +182,11 @@ struct DecodeView: View {
             VStack(alignment: .leading, spacing: 8) {
                 if let prediction = model.decoded.last?.prediction {
                     let worst = prediction.ranked.last?.distance ?? 1
-                    ForEach(prediction.ranked) { candidate in
+                    ForEach(prediction.ranked.prefix(6)) { candidate in
                         HStack {
-                            Text(candidate.label).frame(width: 70, alignment: .leading)
+                            Text(candidate.label)
+                                .lineLimit(1)
+                                .frame(width: model.decodeUnit == .phrases ? 160 : 70, alignment: .leading)
                             LevelMeter(value: candidate.probability ?? (1 - candidate.distance / max(worst * 1.2, 1e-6)),
                                        tint: candidate == prediction.best ? .green : .gray)
                             Text(candidate.probability.map { String(format: "p %.2f", $0) }

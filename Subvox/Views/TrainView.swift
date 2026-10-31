@@ -14,6 +14,7 @@ struct TrainView: View {
                     takes
                     EvaluationPanel()
                     SequenceModelPanel()
+                    PhrasesPanel()
                 }
                 .padding(20)
             }
@@ -240,6 +241,80 @@ private struct SequenceModelPanel: View {
 
     private func percent(_ value: Double) -> String {
         String(format: "%.0f%%", value * 100)
+    }
+}
+
+/// The phrase list for Decode › Phrases. Phrases are built from trained words, so adding one
+/// needs no new recordings once its words have takes.
+private struct PhrasesPanel: View {
+    @Environment(AppModel.self) private var model
+    @State private var newPhrase = ""
+    @State private var newOutput = ""
+
+    var body: some View {
+        GroupBox("Phrases") {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Type a phrase made of words you train above; new words are added to the vocabulary. In Decode › Phrases, mouth the whole phrase in one hold. Only phrases on this list can come out. The output, if set, is shown and spoken instead.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach(model.dataset.phrases) { phrase in
+                    PhraseRow(phrase: phrase)
+                }
+                HStack {
+                    TextField("Phrase, e.g. call you back", text: $newPhrase)
+                        .frame(width: 200)
+                    TextField("Output (optional), e.g. I'll call you back in five minutes", text: $newOutput)
+                        .onSubmit(add)
+                    Button("Add", systemImage: "plus", action: add)
+                        .labelStyle(.iconOnly)
+                        .disabled(newPhrase.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                .textFieldStyle(.roundedBorder)
+                if !model.dataset.phrases.isEmpty, model.phraseDecoder == nil {
+                    Text("Phrase decoding needs at least 2 phrases whose words all have takes.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(6)
+        }
+    }
+
+    private func add() {
+        model.addPhrase(newPhrase, output: newOutput)
+        newPhrase = ""
+        newOutput = ""
+    }
+}
+
+private struct PhraseRow: View {
+    @Environment(AppModel.self) private var model
+    var phrase: Phrase
+    @State private var output = ""
+
+    var body: some View {
+        let missing = model.untrainedWords(in: phrase)
+        HStack {
+            Text(phrase.text)
+                .frame(width: 200, alignment: .leading)
+            TextField("Output (optional) — press Return to save", text: $output)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { model.setPhraseOutput(phrase.id, output) }
+            if missing.isEmpty {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .help("All words have takes")
+            } else {
+                Label("Train: \(missing.joined(separator: ", "))", systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            Button("Delete", systemImage: "trash", role: .destructive) { model.removePhrase(phrase.id) }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+        }
+        .onAppear { output = phrase.output }
     }
 }
 

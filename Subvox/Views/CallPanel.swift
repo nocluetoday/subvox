@@ -30,7 +30,7 @@ struct CallPanel: View {
                     Text("To speak into Zoom, FaceTime or Meet, pick a virtual cable (e.g. BlackHole) here and select it as the call's microphone.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    Toggle("Speak each decoded word", isOn: $voice.speaksDecodedWords)
+                    Toggle("Speak each decoded word or phrase", isOn: $voice.speaksDecodedWords)
                     HStack {
                         Button("Speak Transcript") { voice.speak(model.transcript) }
                             .disabled(model.transcript.isEmpty)

@@ -126,6 +126,22 @@ enum MotionFeatures {
         }
     }
 
+    /// Subtracts a centered moving average of `window` frames from each channel. Removes slow
+    /// drift so a word reads the same whether it was mouthed alone or inside a phrase.
+    static func locallyCentered(_ frames: [[Double]], window: Int) -> [[Double]] {
+        guard let dims = frames.first?.count, frames.count > 1 else { return frames }
+        var prefix = [[Double]](repeating: [Double](repeating: 0, count: dims), count: frames.count + 1)
+        for i in frames.indices {
+            for d in 0..<dims { prefix[i + 1][d] = prefix[i][d] + frames[i][d] }
+        }
+        let half = window / 2
+        return frames.indices.map { i in
+            let lo = max(0, i - half), hi = min(frames.count, i + half + 1)
+            let n = Double(hi - lo)
+            return (0..<dims).map { d in frames[i][d] - (prefix[hi][d] - prefix[lo][d]) / n }
+        }
+    }
+
     /// Stretches or squeezes a sequence to exactly `count` frames, for fixed-window models.
     static func timeNormalized(_ frames: [[Double]], to count: Int) -> [[Double]] {
         guard let last = frames.indices.last, count > 0 else { return frames }

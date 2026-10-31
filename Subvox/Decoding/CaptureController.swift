@@ -15,12 +15,16 @@ final class CaptureController {
     static let prerollSeconds: TimeInterval = 0.3
     static let hangoverSeconds: TimeInterval = 0.35
     static let maxAutoSeconds: TimeInterval = 3
+    /// Phrases have short gaps between words; keep capturing through them.
+    static let phraseHangoverSeconds: TimeInterval = 0.7
+    static let maxAutoPhraseSeconds: TimeInterval = 6
     static let maxHoldSeconds: TimeInterval = 6
 
     var autoEnabled = false {
         didSet { if !autoEnabled, isCapturing, !isManual { finish() } }
     }
     var triggerRatio: Double = 3
+    var phraseMode = false
 
     private(set) var isCapturing = false
     private(set) var isCalibrating = false
@@ -85,11 +89,11 @@ final class CaptureController {
                 if energy < threshold * 0.7 {
                     let since = quietSince ?? sample.t
                     quietSince = since
-                    if sample.t - since > Self.hangoverSeconds { finish() }
+                    if sample.t - since > (phraseMode ? Self.phraseHangoverSeconds : Self.hangoverSeconds) { finish() }
                 } else {
                     quietSince = nil
                 }
-                if duration > Self.maxAutoSeconds { finish() }
+                if duration > (phraseMode ? Self.maxAutoPhraseSeconds : Self.maxAutoSeconds) { finish() }
             }
         } else if autoEnabled, !isCalibrating, let threshold, energy > threshold {
             isManual = false

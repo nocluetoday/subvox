@@ -3,8 +3,19 @@ import Foundation
 struct Dataset: Codable {
     var vocabulary: [String]
     var templates: [Template]
+    var phrases: [Phrase] = []
 
     static let starter = Dataset(vocabulary: ["yes", "no", "next", "back", "stop"], templates: [])
+}
+
+extension Dataset {
+    // Older dataset.json files have no phrases.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        vocabulary = try container.decode([String].self, forKey: .vocabulary)
+        templates = try container.decode([Template].self, forKey: .templates)
+        phrases = try container.decodeIfPresent([Phrase].self, forKey: .phrases) ?? []
+    }
 }
 
 /// Persists the training set as JSON in Application Support.

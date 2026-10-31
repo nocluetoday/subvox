@@ -28,7 +28,7 @@ enum DTW {
         return previous[m] / Double(n + m)
     }
 
-    private static func euclidean(_ x: [Double], _ y: [Double]) -> Double {
+    static func euclidean(_ x: [Double], _ y: [Double]) -> Double {
         var sum = 0.0
         for k in 0..<min(x.count, y.count) {
             let d = x[k] - y[k]

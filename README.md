@@ -53,6 +53,14 @@ Suggested runs: the same 5-word script under **Normal speech**, **Whisper** and 
 
 The training set lives at `~/Library/Application Support/Subvox/dataset.json`.
 
+## Phrases
+
+1. In **Train › Phrases**, type a phrase made of words you train, for example "call you back". New words are added to the vocabulary. You can also type an output, for example "I'll call you back in five minutes".
+2. Train each word as usual (10 takes per word is a good start). A green check shows when every word of a phrase has takes.
+3. In **Decode**, choose **Phrases** and mouth the whole phrase in one hold of Space. Auto-detect waits 0.7 s of stillness before it ends a phrase.
+
+`PhraseDecoder` runs one-pass connected-word DTW. It matches each phrase's words in order against all takes of each word, and allows short pauses between words. Only phrases on the list can be decoded. Channels are locally centered over about 1 s, so a word looks the same alone and inside a phrase. New phrases need no retraining.
+
 ## Silent calls
 
 1. Create a Personal Voice in **System Settings › Accessibility › Personal Voice** (optional; a system voice is used otherwise). Then click **Use My Personal Voice…** in the Decode screen.
