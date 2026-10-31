@@ -14,6 +14,7 @@ struct ContentView: View {
             case .sensors: SensorsView()
             case .train: TrainView()
             case .decode: DecodeView()
+            case .autoTrain: AutoTrainView()
             }
         }
         .toolbar {

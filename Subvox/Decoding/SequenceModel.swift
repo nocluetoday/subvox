@@ -17,6 +17,8 @@ struct SequenceModel: @unchecked Sendable {
         var trainingAccuracy: Double
         var validationAccuracy: Double?
         var validationCount: Int
+        /// Takes collected automatically from speech that went into training.
+        var autoTakeCount: Int?
     }
 
     enum TrainingError: LocalizedError {
@@ -33,6 +35,8 @@ struct SequenceModel: @unchecked Sendable {
 
     let model: MLModel
     let info: Info
+    /// The compiled model on disk; a temporary folder until `save()`.
+    private let location: URL
 
     static var directory: URL {
         URL.applicationSupportDirectory.appending(path: "Subvox", directoryHint: .isDirectory)
@@ -44,7 +48,25 @@ struct SequenceModel: @unchecked Sendable {
         guard let data = try? Data(contentsOf: infoURL),
               let info = try? JSONDecoder().decode(Info.self, from: data),
               let model = try? MLModel(contentsOf: modelURL) else { return nil }
-        return SequenceModel(model: model, info: info)
+        return SequenceModel(model: model, info: info, location: modelURL)
+    }
+
+    /// Makes this the saved model, e.g. when auto-training adopts a challenger.
+    func save() throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: Self.directory, withIntermediateDirectories: true)
+        if location.standardizedFileURL != Self.modelURL.standardizedFileURL {
+            if fm.fileExists(atPath: Self.modelURL.path) { try fm.removeItem(at: Self.modelURL) }
+            try fm.copyItem(at: location, to: Self.modelURL)
+        }
+        try JSONEncoder().encode(info).write(to: Self.infoURL, options: .atomic)
+    }
+
+    /// The fixed silent test set: about 1 in 5 of the takes you recorded yourself, picked by
+    /// take ID so membership never changes. No model trains on these, so any two models can
+    /// be compared on them fairly.
+    static func isTestTake(_ template: Template) -> Bool {
+        template.isManual && template.id.uuid.0 % 5 == 0
     }
 
     static func delete() {
@@ -55,16 +77,17 @@ struct SequenceModel: @unchecked Sendable {
     /// True when the takes or channels changed since training.
     func isStale(templates: [Template], featureSet: FeatureSet) -> Bool {
         let (set, used) = featureSet.resolved(for: templates)
-        return set != info.featureSet || Set(used.map(\.id)) != info.templateIDs
+        return set != info.featureSet || Set(used.filter(\.isManual).map(\.id)) != info.templateIDs
     }
 
     // MARK: Training
 
-    /// Trains and, when `persist` is set, replaces the saved model. Blocks for seconds to a
-    /// minute; call it off the main thread.
-    static func train(templates all: [Template], featureSet requested: FeatureSet,
+    /// Trains on `templates` (your takes) plus `extra` (takes collected from speech) and, when
+    /// `persist` is set, replaces the saved model. The silent test set is always held out.
+    /// Blocks for seconds to a minute; call it off the main thread.
+    static func train(templates all: [Template], extra: [Template] = [], featureSet requested: FeatureSet,
                       maxIterations: Int = defaultIterations, persist: Bool = true) throws -> SequenceModel {
-        let (featureSet, templates) = requested.resolved(for: all)
+        let (featureSet, templates) = requested.resolved(for: all + extra)
         guard !featureSet.isEmpty else { throw TrainingError.notEnoughData("Pick at least one feature channel.") }
         let counts = Dictionary(grouping: templates, by: \.label).mapValues(\.count)
         guard counts.count >= 2, counts.values.allSatisfy({ $0 >= 3 }) else {
@@ -76,12 +99,13 @@ struct SequenceModel: @unchecked Sendable {
         let windows = raw.map { MotionFeatures.timeNormalized(MotionFeatures.scaled($0, by: scales), to: frameCount) }
         let names = featureSet.channelNames
 
-        // Hold out every fifth take of each word that has at least five, for an honest score.
-        var seen: [String: Int] = [:]
-        let held = templates.map { template -> Bool in
-            let k = seen[template.label, default: 0]
-            seen[template.label] = k + 1
-            return counts[template.label, default: 0] >= 5 && k % 5 == 4
+        let held = templates.map(isTestTake)
+        var trainCounts: [String: Int] = [:]
+        for (template, isHeld) in zip(templates, held) where !isHeld {
+            trainCounts[template.label, default: 0] += 1
+        }
+        if let thin = counts.keys.sorted().first(where: { trainCounts[$0, default: 0] < 2 }) {
+            throw TrainingError.notEnoughData("“\(thin)” needs more takes (about 1 in 5 is kept for testing).")
         }
         let training = table(windows, templates, names, include: held.map { !$0 })
         let validation = held.contains(true) ? table(windows, templates, names, include: held) : nil
@@ -101,24 +125,34 @@ struct SequenceModel: @unchecked Sendable {
             featureSet: featureSet,
             scales: scales,
             trainedAt: Date(),
-            templateIDs: Set(templates.map(\.id)),
+            templateIDs: Set(templates.filter(\.isManual).map(\.id)),
             trainingAccuracy: accuracy(classifier.trainingMetrics) ?? 0,
             validationAccuracy: validation == nil ? nil : accuracy(classifier.validationMetrics),
-            validationCount: held.filter { $0 }.count)
+            validationCount: held.filter { $0 }.count,
+            autoTakeCount: templates.filter { !$0.isManual }.count)
 
         let fm = FileManager.default
         let source = fm.temporaryDirectory.appending(path: "Subvox-\(UUID().uuidString).mlmodel")
         try classifier.write(to: source)
         defer { try? fm.removeItem(at: source) }
-        var compiled = try MLModel.compileModel(at: source)
-        if persist {
-            try fm.createDirectory(at: directory, withIntermediateDirectories: true)
-            if fm.fileExists(atPath: modelURL.path) { try fm.removeItem(at: modelURL) }
-            try fm.moveItem(at: compiled, to: modelURL)
-            compiled = modelURL
-            try JSONEncoder().encode(info).write(to: infoURL, options: .atomic)
+        let compiled = try MLModel.compileModel(at: source)
+        let model = SequenceModel(model: try MLModel(contentsOf: compiled), info: info, location: compiled)
+        if persist { try model.save() }
+        return model
+    }
+
+    /// Accuracy on `takes`, plus the mean probability given to the right word (a tie-breaker).
+    func score(on takes: [Template]) -> (accuracy: Double, meanProbability: Double) {
+        guard !takes.isEmpty else { return (0, 0) }
+        var correct = 0
+        var probability = 0.0
+        for take in takes {
+            let ranked = rank(take.samples, lips: take.lips)
+            if ranked.first?.label == take.label { correct += 1 }
+            probability += ranked.first { $0.label == take.label }?.probability ?? 0
         }
-        return SequenceModel(model: try MLModel(contentsOf: compiled), info: info)
+        let n = Double(takes.count)
+        return (Double(correct) / n, probability / n)
     }
 
     private static func accuracy(_ metrics: MLClassifierMetrics) -> Double? {
