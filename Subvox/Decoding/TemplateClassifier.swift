@@ -4,7 +4,15 @@ struct Template: Codable, Identifiable, Hashable, Sendable {
     var id = UUID()
     var label: String
     var samples: [MotionSample]
+    /// Camera lip landmarks over the same time window, when the camera was running.
+    var lips: [LipSample]?
     var createdAt = Date()
+
+    var hasLips: Bool { !(lips ?? []).isEmpty }
+
+    func frames(_ set: FeatureSet) -> [[Double]] {
+        MotionFeatures.frames(MotionFeatures.trim(samples), lips: lips, set: set)
+    }
 
     var duration: TimeInterval {
         guard let first = samples.first, let last = samples.last else { return 0 }
@@ -15,6 +23,8 @@ struct Template: Codable, Identifiable, Hashable, Sendable {
 struct RankedLabel: Identifiable, Hashable, Sendable {
     var label: String
     var distance: Double
+    /// Set by the Core ML decoder; DTW only has distances.
+    var probability: Double?
     var id: String { label }
 }
 
@@ -38,8 +48,9 @@ struct TemplateClassifier: Sendable {
     var labels: [String] { Array(Set(entries.map(\.label))).sorted() }
 
     init?(templates: [Template], featureSet: FeatureSet) {
+        let (featureSet, templates) = featureSet.resolved(for: templates)
         guard !featureSet.isEmpty else { return nil }
-        let raw = templates.map { MotionFeatures.frames(MotionFeatures.trim($0.samples), set: featureSet) }
+        let raw = templates.map { $0.frames(featureSet) }
         guard Set(templates.map(\.label)).count >= 2 else { return nil }
         let scales = MotionFeatures.channelScales(raw)
         self.featureSet = featureSet
@@ -47,9 +58,9 @@ struct TemplateClassifier: Sendable {
         self.entries = zip(templates, raw).map { ($0.label, MotionFeatures.scaled($1, by: scales)) }
     }
 
-    func rank(_ samples: [MotionSample]) -> [RankedLabel] {
+    func rank(_ samples: [MotionSample], lips: [LipSample]? = nil) -> [RankedLabel] {
         let query = MotionFeatures.scaled(
-            MotionFeatures.frames(MotionFeatures.trim(samples), set: featureSet), by: scales)
+            MotionFeatures.frames(MotionFeatures.trim(samples), lips: lips, set: featureSet), by: scales)
         var best: [String: Double] = [:]
         for entry in entries {
             let d = DTW.distance(query, entry.frames)
@@ -58,8 +69,8 @@ struct TemplateClassifier: Sendable {
         return best.map { RankedLabel(label: $0.key, distance: $0.value) }.sorted { $0.distance < $1.distance }
     }
 
-    func predict(_ samples: [MotionSample], maxDistance: Double, minConfidence: Double) -> Prediction {
-        let ranked = rank(samples)
+    func predict(_ samples: [MotionSample], lips: [LipSample]? = nil, maxDistance: Double, minConfidence: Double) -> Prediction {
+        let ranked = rank(samples, lips: lips)
         let confidence = Self.margin(ranked.map(\.distance))
         let accepted = (ranked.first?.distance ?? .infinity) <= maxDistance && confidence >= minConfidence
         return Prediction(ranked: ranked, confidence: confidence, accepted: accepted)
@@ -85,13 +96,16 @@ struct Evaluation: Sendable {
     var pValue: Double
     var permutations: Int
     var templateCount: Int
+    /// The channels actually used, after dropping lips when too few takes have camera data.
+    var featureSet: FeatureSet
 
     static func run(templates: [Template], featureSet: FeatureSet, permutations: Int = 500) -> Evaluation? {
+        let (featureSet, templates) = featureSet.resolved(for: templates)
         let labels = Array(Set(templates.map(\.label))).sorted()
         let counts = Dictionary(grouping: templates, by: \.label).mapValues(\.count)
         guard labels.count >= 2, counts.values.allSatisfy({ $0 >= 2 }), !featureSet.isEmpty else { return nil }
 
-        let raw = templates.map { MotionFeatures.frames(MotionFeatures.trim($0.samples), set: featureSet) }
+        let raw = templates.map { $0.frames(featureSet) }
         let scales = MotionFeatures.channelScales(raw)
         let seqs = raw.map { MotionFeatures.scaled($0, by: scales) }
         let n = seqs.count
@@ -147,6 +161,7 @@ struct Evaluation: Sendable {
             permutationP95: nullAccuracies.isEmpty ? 0 : nullAccuracies[Int(Double(nullAccuracies.count - 1) * 0.95)],
             pValue: Double(atLeast + 1) / Double(permutations + 1),
             permutations: permutations,
-            templateCount: n)
+            templateCount: n,
+            featureSet: featureSet)
     }
 }

@@ -22,6 +22,8 @@
 	<string>1</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.developer-tools</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Subvox reads lip and jaw landmarks from the front camera and fuses them with AirPods motion to decode mouthed words.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Subvox records microphone audio alongside motion data and transcribes whispered speech for comparison.</string>
 	<key>NSMotionUsageDescription</key>

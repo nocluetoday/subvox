@@ -1,14 +1,36 @@
 import Foundation
 
-/// Which motion channels feed the classifier. Toggling these is the ablation experiment:
-/// does articulation show up in acceleration, rotation, or slow head attitude?
+/// Which channels feed the classifier. Toggling these is the ablation experiment:
+/// does articulation show up in acceleration, rotation, slow head attitude, or the lips?
 struct FeatureSet: OptionSet, Codable, Hashable, Sendable {
     let rawValue: Int
 
     static let acceleration = FeatureSet(rawValue: 1 << 0)
     static let rotation = FeatureSet(rawValue: 1 << 1)
     static let attitude = FeatureSet(rawValue: 1 << 2)
-    static let all: FeatureSet = [.acceleration, .rotation, .attitude]
+    /// Camera lip and jaw landmarks, resampled onto the motion timestamps.
+    static let lips = FeatureSet(rawValue: 1 << 3)
+    static let motion: FeatureSet = [.acceleration, .rotation, .attitude]
+    static let all: FeatureSet = [.motion, .lips]
+
+    /// Column names in frame order, matching `MotionFeatures.frames`.
+    var channelNames: [String] {
+        var names: [String] = []
+        if contains(.acceleration) { names += ["ax", "ay", "az"] }
+        if contains(.rotation) { names += ["rx", "ry", "rz"] }
+        if contains(.attitude) { names += ["pitch", "roll", "yaw"] }
+        if contains(.lips) { names += LipSample.channelNames }
+        return names
+    }
+
+    /// Lip channels need camera data on every take. If fewer than two words have camera takes,
+    /// fall back to motion-only over all takes; otherwise keep only the takes with camera data.
+    func resolved(for templates: [Template]) -> (set: FeatureSet, templates: [Template]) {
+        guard contains(.lips) else { return (self, templates) }
+        let paired = templates.filter(\.hasLips)
+        if Set(paired.map(\.label)).count >= 2 { return (self, paired) }
+        return (subtracting(.lips), templates)
+    }
 }
 
 enum MotionFeatures {
@@ -39,15 +61,19 @@ enum MotionFeatures {
     }
 
     /// Per-frame feature vectors, mean-centered per channel (removes posture/heading bias).
-    static func frames(_ samples: [MotionSample], set: FeatureSet) -> [[Double]] {
+    /// Lip channels are interpolated at each motion timestamp, so motion is the master clock;
+    /// they stay zero when no camera data was captured.
+    static func frames(_ samples: [MotionSample], lips: [LipSample]? = nil, set: FeatureSet) -> [[Double]] {
         guard let origin = samples.first else { return [] }
-        var frames = samples.map { s -> [Double] in
+        let lipFrames = set.contains(.lips) ? resampled(lips ?? [], at: samples.map(\.t)) : []
+        var frames = samples.enumerated().map { i, s -> [Double] in
             var v: [Double] = []
             if set.contains(.acceleration) { v += [s.ax, s.ay, s.az] }
             if set.contains(.rotation) { v += [s.rx, s.ry, s.rz] }
             if set.contains(.attitude) {
                 v += [wrapped(s.pitch - origin.pitch), wrapped(s.roll - origin.roll), wrapped(s.yaw - origin.yaw)]
             }
+            if set.contains(.lips) { v += lipFrames[i] }
             return v
         }
         guard let dims = frames.first?.count, dims > 0 else { return frames }
@@ -82,6 +108,49 @@ enum MotionFeatures {
 
     static func scaled(_ frames: [[Double]], by scales: [Double]) -> [[Double]] {
         frames.map { frame in zip(frame, scales).map { $0 / $1 } }
+    }
+
+    /// Linear interpolation of the lip stream at `times`, clamped at the ends.
+    static func resampled(_ lips: [LipSample], at times: [TimeInterval]) -> [[Double]] {
+        let zero = [Double](repeating: 0, count: LipSample.channelNames.count)
+        guard !lips.isEmpty else { return times.map { _ in zero } }
+        let sorted = lips.sorted { $0.t < $1.t }
+        var j = 0
+        return times.map { t in
+            while j + 1 < sorted.count, sorted[j + 1].t <= t { j += 1 }
+            let a = sorted[j]
+            guard t > a.t, j + 1 < sorted.count else { return a.vector }
+            let b = sorted[j + 1]
+            let w = (t - a.t) / max(b.t - a.t, 1e-9)
+            return zip(a.vector, b.vector).map { $0 + ($1 - $0) * w }
+        }
+    }
+
+    /// Subtracts a centered moving average of `window` frames from each channel. Removes slow
+    /// drift so a word reads the same whether it was mouthed alone or inside a phrase.
+    static func locallyCentered(_ frames: [[Double]], window: Int) -> [[Double]] {
+        guard let dims = frames.first?.count, frames.count > 1 else { return frames }
+        var prefix = [[Double]](repeating: [Double](repeating: 0, count: dims), count: frames.count + 1)
+        for i in frames.indices {
+            for d in 0..<dims { prefix[i + 1][d] = prefix[i][d] + frames[i][d] }
+        }
+        let half = window / 2
+        return frames.indices.map { i in
+            let lo = max(0, i - half), hi = min(frames.count, i + half + 1)
+            let n = Double(hi - lo)
+            return (0..<dims).map { d in frames[i][d] - (prefix[hi][d] - prefix[lo][d]) / n }
+        }
+    }
+
+    /// Stretches or squeezes a sequence to exactly `count` frames, for fixed-window models.
+    static func timeNormalized(_ frames: [[Double]], to count: Int) -> [[Double]] {
+        guard let last = frames.indices.last, count > 0 else { return frames }
+        return (0..<count).map { k in
+            let x = count == 1 ? 0 : Double(k) * Double(last) / Double(count - 1)
+            let i = Int(x), w = x - Double(i)
+            guard i < last else { return frames[last] }
+            return zip(frames[i], frames[i + 1]).map { $0 + ($1 - $0) * w }
+        }
     }
 
     private static func wrapped(_ angle: Double) -> Double {

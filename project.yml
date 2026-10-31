@@ -22,6 +22,7 @@ targets:
         CFBundleDisplayName: Subvox
         LSApplicationCategoryType: public.app-category.developer-tools
         NSMotionUsageDescription: Subvox reads AirPods head-motion data to study whether mouthed words can be decoded into text.
+        NSCameraUsageDescription: Subvox reads lip and jaw landmarks from the front camera and fuses them with AirPods motion to decode mouthed words.
         NSMicrophoneUsageDescription: Subvox records microphone audio alongside motion data and transcribes whispered speech for comparison.
         NSSpeechRecognitionUsageDescription: Subvox transcribes microphone audio on-device as a reference for the motion decoder.
     settings:

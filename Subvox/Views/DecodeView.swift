@@ -8,8 +8,13 @@ struct DecodeView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                if model.classifier == nil {
-                    Label("Train at least two words in the Train tab first.", systemImage: "exclamationmark.triangle")
+                if !model.canDecode {
+                    Label(model.decodeUnit == .phrases
+                          ? "Add at least two phrases whose words all have takes (Train tab)."
+                          : model.decoder == .dtw
+                          ? "Train at least two words in the Train tab first."
+                          : "Train the Core ML model in the Train tab first.",
+                          systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.orange)
                 }
                 controls
@@ -18,6 +23,7 @@ struct DecodeView: View {
                     lastPredictionPanel
                     micPanel
                 }
+                CallPanel()
             }
             .padding(20)
         }
@@ -30,6 +36,33 @@ struct DecodeView: View {
         @Bindable var capture = model.capture
         return GroupBox {
             VStack(alignment: .leading, spacing: 12) {
+                Picker("Decode", selection: $model.decodeUnit) {
+                    ForEach(AppModel.DecodeUnit.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 320)
+
+                if model.decodeUnit == .words {
+                    Picker("Decoder", selection: $model.decoder) {
+                        ForEach(AppModel.Decoder.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 320)
+                } else {
+                    Text("Mouth a whole phrase in one hold. It is matched word by word against your takes (DTW), and only phrases on your list can come out.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if model.decoderUsesLips {
+                    CameraStatusRow()
+                    if model.decodeBlockedByCamera {
+                        Text("This decoder uses lip channels. Decoding is paused until the camera is on.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
+
                 Picker("Segmentation", selection: $model.decodeMode) {
                     ForEach(CaptureController.Mode.allCases) { Text($0.rawValue).tag($0) }
                 }
@@ -38,9 +71,9 @@ struct DecodeView: View {
 
                 if model.decodeMode == .hold {
                     HoldToCaptureButton(
-                        title: "Mouth a word",
+                        title: model.decodeUnit == .phrases ? "Mouth a phrase" : "Mouth a word",
                         isCapturing: capture.isCapturing,
-                        isEnabled: model.classifier != nil && model.motion.status == .streaming,
+                        isEnabled: model.readyToDecode && model.motion.status == .streaming,
                         onBegin: capture.begin,
                         onEnd: capture.end)
                 } else {
@@ -48,9 +81,16 @@ struct DecodeView: View {
                 }
 
                 HStack(spacing: 24) {
-                    LabeledContent("Max distance") {
-                        Slider(value: $model.maxDistance, in: 0.2...4).frame(width: 140)
-                        Text(String(format: "%.2f", model.maxDistance)).monospacedDigit().frame(width: 36)
+                    if model.decoder == .dtw || model.decodeUnit == .phrases {
+                        LabeledContent("Max distance") {
+                            Slider(value: $model.maxDistance, in: 0.2...4).frame(width: 140)
+                            Text(String(format: "%.2f", model.maxDistance)).monospacedDigit().frame(width: 36)
+                        }
+                    } else {
+                        LabeledContent("Min probability") {
+                            Slider(value: $model.minProbability, in: 0...1).frame(width: 140)
+                            Text(String(format: "%.2f", model.minProbability)).monospacedDigit().frame(width: 36)
+                        }
                     }
                     LabeledContent("Min confidence") {
                         Slider(value: $model.minConfidence, in: 0...0.5).frame(width: 140)
@@ -110,7 +150,7 @@ struct DecodeView: View {
                         .disabled(model.decoded.isEmpty)
                 }
                 if model.decoded.isEmpty {
-                    Text("Mouth a trained word…")
+                    Text(model.decodeUnit == .phrases ? "Mouth a phrase from your list…" : "Mouth a trained word…")
                         .font(.system(size: 28, weight: .regular, design: .rounded))
                         .foregroundStyle(.tertiary)
                         .frame(maxWidth: .infinity, minHeight: 80, alignment: .topLeading)
@@ -142,14 +182,17 @@ struct DecodeView: View {
             VStack(alignment: .leading, spacing: 8) {
                 if let prediction = model.decoded.last?.prediction {
                     let worst = prediction.ranked.last?.distance ?? 1
-                    ForEach(prediction.ranked) { candidate in
+                    ForEach(prediction.ranked.prefix(6)) { candidate in
                         HStack {
-                            Text(candidate.label).frame(width: 70, alignment: .leading)
-                            LevelMeter(value: 1 - candidate.distance / max(worst * 1.2, 1e-6),
+                            Text(candidate.label)
+                                .lineLimit(1)
+                                .frame(width: model.decodeUnit == .phrases ? 160 : 70, alignment: .leading)
+                            LevelMeter(value: candidate.probability ?? (1 - candidate.distance / max(worst * 1.2, 1e-6)),
                                        tint: candidate == prediction.best ? .green : .gray)
-                            Text(String(format: "%.2f", candidate.distance))
+                            Text(candidate.probability.map { String(format: "p %.2f", $0) }
+                                 ?? String(format: "%.2f", candidate.distance))
                                 .font(.caption.monospacedDigit())
-                                .frame(width: 40, alignment: .trailing)
+                                .frame(width: 48, alignment: .trailing)
                         }
                     }
                     Text(String(format: "Confidence %.2f · %@", prediction.confidence,
@@ -158,8 +201,11 @@ struct DecodeView: View {
                         .foregroundStyle(.secondary)
                     SignalPlot(title: "Rotation rate", samples: model.lastSegment,
                                channels: SignalPlot.rotation, minScale: 0.05, height: 60)
+                    if !model.lastSegmentLips.isEmpty {
+                        LipPlot(samples: model.lastSegmentLips, height: 50)
+                    }
                 } else {
-                    Text("DTW distance to each word's closest take appears here.")
+                    Text("DTW distance or model probability for each word appears here.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
