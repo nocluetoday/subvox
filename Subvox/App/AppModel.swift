@@ -165,7 +165,7 @@ final class AppModel {
         if NSApp.keyWindow?.firstResponder is NSText { return false }
         switch screen {
         case .train: return selectedWord != nil
-        case .decode: return decodeMode == .hold && canDecode
+        case .decode: return decodeMode == .hold && readyToDecode
         case .sensors: return recorder.isRecording
         }
     }
@@ -187,12 +187,19 @@ final class AppModel {
         }
     }
 
+    /// A lip-fused decoder with the camera off would read a still mouth and guess; refuse instead.
+    var decodeBlockedByCamera: Bool { decoderUsesLips && !camera.isRunning }
+
+    var readyToDecode: Bool { canDecode && !decodeBlockedByCamera }
+
     private func predict(_ segment: [MotionSample], lips: [LipSample]?) -> Prediction? {
+        // Also refuse segments where the camera was on but saw no face.
+        guard readyToDecode, lips != nil || !decoderUsesLips else { return nil }
         switch decoder {
         case .dtw:
-            classifier?.predict(segment, lips: lips, maxDistance: maxDistance, minConfidence: minConfidence)
+            return classifier?.predict(segment, lips: lips, maxDistance: maxDistance, minConfidence: minConfidence)
         case .sequenceModel:
-            sequenceModel?.predict(segment, lips: lips, minProbability: minProbability, minConfidence: minConfidence)
+            return sequenceModel?.predict(segment, lips: lips, minProbability: minProbability, minConfidence: minConfidence)
         }
     }
 

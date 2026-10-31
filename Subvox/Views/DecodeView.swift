@@ -42,8 +42,8 @@ struct DecodeView: View {
 
                 if model.decoderUsesLips {
                     CameraStatusRow()
-                    if !model.camera.isRunning {
-                        Text("This decoder uses lip channels. Start the camera, or they read as a still mouth.")
+                    if model.decodeBlockedByCamera {
+                        Text("This decoder uses lip channels. Decoding is paused until the camera is on.")
                             .font(.caption)
                             .foregroundStyle(.orange)
                     }
@@ -59,7 +59,7 @@ struct DecodeView: View {
                     HoldToCaptureButton(
                         title: "Mouth a word",
                         isCapturing: capture.isCapturing,
-                        isEnabled: model.canDecode && model.motion.status == .streaming,
+                        isEnabled: model.readyToDecode && model.motion.status == .streaming,
                         onBegin: capture.begin,
                         onEnd: capture.end)
                 } else {
