@@ -13,6 +13,7 @@ struct TrainView: View {
                     capturePanel
                     takes
                     EvaluationPanel()
+                    SequenceModelPanel()
                 }
                 .padding(20)
             }
@@ -63,6 +64,12 @@ struct TrainView: View {
                 isEnabled: model.selectedWord != nil && model.motion.status == .streaming,
                 onBegin: model.capture.begin,
                 onEnd: model.capture.end)
+            CameraStatusRow()
+            if !model.camera.isRunning {
+                Text("Start the camera to store lip and jaw landmarks with each take.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             if model.motion.status != .streaming {
                 Label(model.motion.status.label, systemImage: "airpodspro")
                     .font(.caption)
@@ -113,6 +120,12 @@ private struct TakeTile: View {
                 Text(String(format: "%.2f s · %d", template.duration, template.samples.count))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
+                if template.hasLips {
+                    Image(systemName: "camera.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .help("Has camera lip data")
+                }
                 Spacer()
                 Button("Delete", systemImage: "trash", role: .destructive, action: onDelete)
                     .labelStyle(.iconOnly)
@@ -136,12 +149,22 @@ private struct EvaluationPanel: View {
                     FeatureToggle(title: "Acceleration", option: .acceleration)
                     FeatureToggle(title: "Rotation", option: .rotation)
                     FeatureToggle(title: "Attitude", option: .attitude)
+                    FeatureToggle(title: "Lips (camera)", option: .lips)
                     Spacer()
                     Button(model.isEvaluating ? "Evaluating…" : "Evaluate") { model.evaluate() }
                         .disabled(model.isEvaluating || model.featureSet.isEmpty)
                 }
                 if let result = model.evaluation {
                     EvaluationResultView(result: result)
+                    if model.featureSet.contains(.lips), !result.featureSet.contains(.lips) {
+                        Text("Lips were skipped: fewer than two words have takes recorded with the camera on.")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    } else if result.featureSet.contains(.lips) {
+                        Text("Lip channels included; only takes with camera data were used.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 } else {
                     Text("Needs ≥ 2 words with ≥ 2 takes each. Each take is classified against all the others; the same is repeated with shuffled labels to show what chance looks like.")
                         .font(.caption)
@@ -151,6 +174,72 @@ private struct EvaluationPanel: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(6)
         }
+    }
+}
+
+/// Trains the Core ML sequence model on the current takes and channels.
+private struct SequenceModelPanel: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        GroupBox("Sequence model (Core ML, trained on your takes)") {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("A convolution + LSTM classifier over the same channels as above. It learns how much to trust motion versus lips.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if model.sequenceModel != nil {
+                        Button("Delete", role: .destructive, action: model.deleteSequenceModel)
+                            .disabled(model.isTrainingModel)
+                    }
+                    Button(model.isTrainingModel ? "Training…" : (model.sequenceModel == nil ? "Train Model" : "Retrain"),
+                           action: model.trainSequenceModel)
+                        .disabled(model.isTrainingModel || model.featureSet.isEmpty)
+                }
+                if model.isTrainingModel {
+                    ProgressView().controlSize(.small)
+                }
+                if let info = model.sequenceModel?.info {
+                    HStack(spacing: 24) {
+                        metric("Validation", info.validationAccuracy.map(percent) ?? "—")
+                        metric("Training", percent(info.trainingAccuracy))
+                        metric("Takes", "\(info.templateIDs.count)")
+                        metric("Channels", "\(info.featureSet.channelNames.count)\(info.featureSet.contains(.lips) ? " incl. lips" : "")")
+                    }
+                    Text(info.validationAccuracy == nil
+                         ? "No validation score: each word needs 5+ takes so one in five can be held out."
+                         : "Validation accuracy is on \(info.validationCount) held-out takes the model never saw.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if model.sequenceModelIsStale {
+                        Label("Takes or channels changed since training. Retrain to include them.", systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                } else if !model.isTrainingModel {
+                    Text("Needs 2+ words with 3+ takes each; 10+ takes per word recommended.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let error = model.modelError {
+                    Text(error).font(.caption).foregroundStyle(.red)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(6)
+        }
+    }
+
+    private func metric(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.title3.monospacedDigit())
+        }
+    }
+
+    private func percent(_ value: Double) -> String {
+        String(format: "%.0f%%", value * 100)
     }
 }
 

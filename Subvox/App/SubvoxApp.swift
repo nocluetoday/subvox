@@ -12,5 +12,11 @@ struct SubvoxApp: App {
                 .task { model.start() }
         }
         .windowResizability(.contentMinSize)
+
+        Window("Avatar", id: "avatar") {
+            AvatarWindow()
+                .environment(model)
+        }
+        .defaultSize(width: 480, height: 360)
     }
 }

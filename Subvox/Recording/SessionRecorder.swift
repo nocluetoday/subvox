@@ -6,6 +6,7 @@ import Observation
 ///
 /// Output: ~/Documents/Subvox/Sessions/<timestamp>-<condition>/
 ///   motion.csv  — every headphone-motion sample, t relative to session start
+///   lips.csv    — camera lip/jaw landmarks (if the camera is running), same t clock
 ///   audio.caf   — microphone audio (if the mic is running)
 ///   events.csv  — captured segments with their label / prediction
 ///   meta.json   — condition, prompt, clock offsets
@@ -30,6 +31,7 @@ final class SessionRecorder {
     private(set) var isRecording = false
     private(set) var startedAt: Date?
     private(set) var motionCount = 0
+    private(set) var lipCount = 0
     private(set) var eventCount = 0
     private(set) var lastSessionURL: URL?
     private(set) var error: String?
@@ -42,6 +44,7 @@ final class SessionRecorder {
     @ObservationIgnored private var startUptime: TimeInterval = 0
     @ObservationIgnored private var motionHandle: FileHandle?
     @ObservationIgnored private var eventsHandle: FileHandle?
+    @ObservationIgnored private var lipsHandle: FileHandle?
     @ObservationIgnored private var audioWriter: AudioFileWriter?
     @ObservationIgnored private var sinkID: UUID?
     @ObservationIgnored private weak var sink: AudioSink?
@@ -57,6 +60,7 @@ final class SessionRecorder {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             motionHandle = try Self.makeFile(dir.appending(path: "motion.csv"), header: MotionSample.csvHeader)
             eventsHandle = try Self.makeFile(dir.appending(path: "events.csv"), header: "start,end,kind,label,confidence")
+            lipsHandle = try Self.makeFile(dir.appending(path: "lips.csv"), header: LipSample.csvHeader)
         } catch {
             self.error = error.localizedDescription
             return
@@ -66,6 +70,7 @@ final class SessionRecorder {
         startUptime = ProcessInfo.processInfo.systemUptime
         startedAt = Date()
         motionCount = 0
+        lipCount = 0
         eventCount = 0
 
         if audio.isRunning {
@@ -87,8 +92,10 @@ final class SessionRecorder {
         audioWriter = nil
         try? motionHandle?.close()
         try? eventsHandle?.close()
+        try? lipsHandle?.close()
         motionHandle = nil
         eventsHandle = nil
+        lipsHandle = nil
 
         let meta: [String: Any] = [
             "condition": condition.rawValue,
@@ -97,11 +104,12 @@ final class SessionRecorder {
             "startUptime": startUptime,
             "durationSeconds": ProcessInfo.processInfo.systemUptime - startUptime,
             "motionSamples": motionCount,
+            "lipSamples": lipCount,
             "events": eventCount,
             "audioDevice": audioDeviceName ?? NSNull(),
             "audioSampleRate": audioInfo?.sampleRate ?? NSNull(),
             "audioStartOffsetSeconds": audioInfo?.firstHostSeconds.map { $0 - startUptime } ?? NSNull(),
-            "note": "Motion t and audioStartOffsetSeconds are relative to startUptime (seconds since boot).",
+            "note": "Motion t, lip t and audioStartOffsetSeconds are relative to startUptime (seconds since boot).",
         ]
         if let data = try? JSONSerialization.data(withJSONObject: meta, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: directory.appending(path: "meta.json"))
@@ -114,6 +122,12 @@ final class SessionRecorder {
         guard isRecording else { return }
         motionHandle?.write(Data((sample.csvRow(relativeTo: startUptime) + "\n").utf8))
         motionCount += 1
+    }
+
+    func record(_ lip: LipSample) {
+        guard isRecording else { return }
+        lipsHandle?.write(Data((lip.csvRow(relativeTo: startUptime) + "\n").utf8))
+        lipCount += 1
     }
 
     func logEvent(_ segment: [MotionSample], kind: String, label: String, confidence: Double?) {

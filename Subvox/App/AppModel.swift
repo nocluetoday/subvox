@@ -23,7 +23,15 @@ final class AppModel {
         }
     }
 
+    enum Decoder: String, CaseIterable, Identifiable {
+        case dtw = "DTW templates"
+        case sequenceModel = "Core ML model"
+        var id: String { rawValue }
+    }
+
     let motion = HeadphoneMotionService()
+    let camera = FaceCameraService()
+    let voice = VoiceOutput()
     let audio = AudioService()
     let transcriber = MicTranscriber()
     let capture = CaptureController()
@@ -44,16 +52,27 @@ final class AppModel {
     private(set) var evaluation: Evaluation?
     private(set) var isEvaluating = false
     private(set) var lastTemplateID: Template.ID?
+    private(set) var sequenceModel = SequenceModel.load()
+    private(set) var isTrainingModel = false
+    private(set) var modelError: String?
 
     // MARK: Decoding
 
     var decodeMode: CaptureController.Mode = .hold {
         didSet { syncCaptureMode() }
     }
+    var decoder: Decoder = .dtw
     var maxDistance: Double = 1.5
     var minConfidence: Double = 0.05
+    /// Core ML decoder: reject words whose top probability is below this.
+    var minProbability: Double = 0.5
     private(set) var decoded: [DecodedWord] = []
     private(set) var lastSegment: [MotionSample] = []
+    private(set) var lastSegmentLips: [LipSample] = []
+
+    // MARK: Silent call
+
+    var avatarGreenScreen = false
 
     @ObservationIgnored private var keyMonitor: Any?
     @ObservationIgnored private var started = false
@@ -61,6 +80,7 @@ final class AppModel {
     init() {
         selectedWord = dataset.vocabulary.first
         rebuildClassifier()
+        if sequenceModel != nil { decoder = .sequenceModel }
     }
 
     func start() {
@@ -68,8 +88,10 @@ final class AppModel {
         started = true
         motion.onSample = { [weak self] sample in self?.ingest(sample) }
         capture.onSegment = { [weak self] segment in self?.handleSegment(segment) }
+        camera.onSample = { [weak self] lip in self?.recorder.record(lip) }
         motion.start()
         audio.refreshDevices()
+        voice.refresh()
         installKeyMonitor()
     }
 
@@ -83,18 +105,36 @@ final class AppModel {
     }
 
     private func handleSegment(_ segment: [MotionSample]) {
+        guard camera.isRunning, let first = segment.first, let last = segment.last else {
+            process(segment, lips: nil)
+            return
+        }
+        // Vision trails the motion stream by a frame or two; wait for the segment's last frames.
+        let wait = min(max(camera.latency + 0.05, 0.1), 0.5)
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(wait))
+            guard let self else { return }
+            let lips = self.camera.lips(in: (first.t - 0.1)...(last.t + 0.1))
+            self.process(segment, lips: lips.isEmpty ? nil : lips)
+        }
+    }
+
+    private func process(_ segment: [MotionSample], lips: [LipSample]?) {
         lastSegment = segment
+        lastSegmentLips = lips ?? []
         switch screen {
         case .train:
             guard let word = selectedWord else { return }
-            addTemplate(Template(label: word, samples: segment))
+            addTemplate(Template(label: word, samples: segment, lips: lips))
             recorder.logEvent(segment, kind: "train", label: word, confidence: nil)
         case .decode:
-            guard let classifier else { return }
-            let prediction = classifier.predict(segment, maxDistance: maxDistance, minConfidence: minConfidence)
+            guard let prediction = predict(segment, lips: lips) else { return }
             decoded.append(DecodedWord(prediction: prediction))
             recorder.logEvent(segment, kind: prediction.accepted ? "decode" : "reject",
                               label: prediction.best?.label ?? "", confidence: prediction.confidence)
+            if prediction.accepted, voice.speaksDecodedWords, let word = prediction.best?.label {
+                voice.speak(word)
+            }
         case .sensors:
             recorder.logEvent(segment, kind: "segment", label: recorder.prompt, confidence: nil)
         }
@@ -125,9 +165,66 @@ final class AppModel {
         if NSApp.keyWindow?.firstResponder is NSText { return false }
         switch screen {
         case .train: return selectedWord != nil
-        case .decode: return decodeMode == .hold && classifier != nil
+        case .decode: return decodeMode == .hold && canDecode
         case .sensors: return recorder.isRecording
         }
+    }
+
+    // MARK: Decoders
+
+    var canDecode: Bool {
+        switch decoder {
+        case .dtw: classifier != nil
+        case .sequenceModel: sequenceModel != nil
+        }
+    }
+
+    /// True when the active decoder fuses lip channels, so the camera should be running.
+    var decoderUsesLips: Bool {
+        switch decoder {
+        case .dtw: classifier?.featureSet.contains(.lips) ?? false
+        case .sequenceModel: sequenceModel?.info.featureSet.contains(.lips) ?? false
+        }
+    }
+
+    private func predict(_ segment: [MotionSample], lips: [LipSample]?) -> Prediction? {
+        switch decoder {
+        case .dtw:
+            classifier?.predict(segment, lips: lips, maxDistance: maxDistance, minConfidence: minConfidence)
+        case .sequenceModel:
+            sequenceModel?.predict(segment, lips: lips, minProbability: minProbability, minConfidence: minConfidence)
+        }
+    }
+
+    var sequenceModelIsStale: Bool {
+        sequenceModel?.isStale(templates: dataset.templates, featureSet: featureSet) ?? false
+    }
+
+    func trainSequenceModel() {
+        guard !isTrainingModel else { return }
+        isTrainingModel = true
+        modelError = nil
+        let templates = dataset.templates
+        let featureSet = featureSet
+        Task {
+            let result = await Task.detached(priority: .userInitiated) {
+                Result { try SequenceModel.train(templates: templates, featureSet: featureSet) }
+            }.value
+            switch result {
+            case .success(let model):
+                self.sequenceModel = model
+                self.decoder = .sequenceModel
+            case .failure(let error):
+                self.modelError = error.localizedDescription
+            }
+            self.isTrainingModel = false
+        }
+    }
+
+    func deleteSequenceModel() {
+        SequenceModel.delete()
+        sequenceModel = nil
+        decoder = .dtw
     }
 
     // MARK: Dataset editing
@@ -195,6 +292,17 @@ final class AppModel {
     func clearDecoded() {
         decoded.removeAll()
         lastSegment = []
+        lastSegmentLips = []
+    }
+
+    // MARK: Camera
+
+    func toggleCamera() async {
+        if camera.isRunning {
+            camera.stop()
+        } else {
+            await camera.start()
+        }
     }
 
     // MARK: Mic

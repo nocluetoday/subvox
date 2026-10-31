@@ -1,6 +1,7 @@
 import CoreAudio
 
-/// Minimal Core Audio queries for picking the capture device (e.g. AirPods vs. built-in mic).
+/// Minimal Core Audio queries for picking the capture device (e.g. AirPods vs. built-in mic)
+/// and the playback device for the silent-call voice (e.g. a virtual cable into a call app).
 enum AudioDevices {
     struct Device: Identifiable, Hashable {
         let id: AudioDeviceID
@@ -8,6 +9,14 @@ enum AudioDevices {
     }
 
     static func inputDevices() -> [Device] {
+        devices(scope: kAudioDevicePropertyScopeInput)
+    }
+
+    static func outputDevices() -> [Device] {
+        devices(scope: kAudioDevicePropertyScopeOutput)
+    }
+
+    private static func devices(scope: AudioObjectPropertyScope) -> [Device] {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -19,7 +28,7 @@ enum AudioDevices {
         guard AudioObjectGetPropertyData(system, &address, 0, nil, &size, &ids) == noErr else { return [] }
 
         return ids.compactMap { id in
-            guard inputChannelCount(id) > 0 else { return nil }
+            guard channelCount(id, scope: scope) > 0 else { return nil }
             return Device(id: id, name: name(of: id) ?? "Device \(id)")
         }
     }
@@ -49,10 +58,10 @@ enum AudioDevices {
         return name.takeRetainedValue() as String
     }
 
-    private static func inputChannelCount(_ id: AudioDeviceID) -> Int {
+    private static func channelCount(_ id: AudioDeviceID, scope: AudioObjectPropertyScope) -> Int {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreamConfiguration,
-            mScope: kAudioDevicePropertyScopeInput,
+            mScope: scope,
             mElement: kAudioObjectPropertyElementMain)
         var size: UInt32 = 0
         guard AudioObjectGetPropertyDataSize(id, &address, 0, nil, &size) == noErr, size > 0 else { return 0 }

@@ -15,6 +15,8 @@ struct SensorsView: View {
                     MicrophoneCard()
                 }
 
+                CameraCard()
+
                 GroupBox("Live motion (last 8 s)") {
                     VStack(spacing: 12) {
                         SignalPlot(title: "User acceleration (g)", samples: motion.history,
